@@ -475,6 +475,27 @@ void LayerNormDeviceOperation::validate_on_program_cache_miss(
                             output_shard_spec.shape[0],
                             shard_spec.shape[0]);
                     }
+                } else if (
+                    operation_attributes.distributed_norm_stage == DistributedLayerNormStage::NOT_DISTRIBUTED &&
+                    !program_config.inplace && operation_attributes.output_mem_config.shard_spec().has_value()) {
+                    // Outside the post-all-gather stage the sharded factory skips the write-back: each core
+                    // normalizes its block, laid out for the input's shard spec, straight into the output tensor's
+                    // L1 on that same core. An output with another grid, shard shape or orientation was accepted
+                    // and filled in the input's layout, which returned wrong values without an error.
+                    const auto output_shard_spec = operation_attributes.output_mem_config.shard_spec().value();
+                    TT_FATAL(
+                        output_shard_spec.grid == shard_spec.grid && output_shard_spec.shape == shard_spec.shape &&
+                            output_shard_spec.orientation == shard_spec.orientation,
+                        "Sharded layer norm writes each core's block into the output shard on the same core, so the "
+                        "output shard spec must equal the input's. Input grid {}, shard shape [{}, {}]; output grid "
+                        "{}, shard shape [{}, {}]. Omit memory_config to use the input's, or reshard the result with "
+                        "to_memory_config.",
+                        shard_spec.grid,
+                        shard_spec.shape[0],
+                        shard_spec.shape[1],
+                        output_shard_spec.grid,
+                        output_shard_spec.shape[0],
+                        output_shard_spec.shape[1]);
                 }
             }
         },
