@@ -82,6 +82,29 @@ void UpsampleOperation::validate_on_program_cache_miss(const operation_attribute
         "{}",
         operations::pool::upsample::generate_unsupported_config_message(
             input, args.scale_factor_h, args.scale_factor_w, args.mode));
+
+    // The integer-scale sharded factory runs on the input's shard grid and upsamples the input shard on each core
+    // straight into the output shard on that same core, with no data movement between cores. That is only correct
+    // when the output keeps the input's memory layout, grid and orientation; its shard shape is derived from the
+    // input's in compute_output_specs. Any other request used to return wrong values without an error.
+    if (args.mode == "nearest" && path == operations::pool::upsample::UpsamplePath::INTEGER_OPTIMIZED &&
+        input.is_sharded() && input.shard_spec().has_value() && args.output_mem_config.is_sharded() &&
+        args.output_mem_config.shard_spec().has_value()) {
+        const auto& in_shard = input.shard_spec().value();
+        const auto& out_shard = args.output_mem_config.shard_spec().value();
+        TT_FATAL(
+            input.memory_config().memory_layout() == args.output_mem_config.memory_layout() &&
+                in_shard.grid == out_shard.grid && in_shard.orientation == out_shard.orientation,
+            "Sharded nearest upsample writes each core's result into the output shard on the same core, so the output "
+            "must keep the input's memory layout, shard grid and shard orientation. Input: {}, grid {}, {}. Output: "
+            "{}, grid {}, {}. Omit memory_config to use the input's, or reshard the result with to_memory_config.",
+            input.memory_config().memory_layout(),
+            in_shard.grid,
+            in_shard.orientation == tt::tt_metal::ShardOrientation::ROW_MAJOR ? "ROW_MAJOR" : "COL_MAJOR",
+            args.output_mem_config.memory_layout(),
+            out_shard.grid,
+            out_shard.orientation == tt::tt_metal::ShardOrientation::ROW_MAJOR ? "ROW_MAJOR" : "COL_MAJOR");
+    }
 }
 
 UpsampleOperation::spec_return_value_t UpsampleOperation::compute_output_specs(

@@ -356,3 +356,76 @@ def test_typecast_sharded_output_stays_sharded(shape, shard_shape, core_grid, sh
     assert tt_input_sharded.is_sharded(), "Input should be sharded"
     tt_output = ttnn.typecast(tt_input_sharded, ttnn.bfloat16)
     assert tt_output.is_sharded(), "Output should remain sharded after typecast"
+
+
+def _block_sharded_config(grid_start, orientation):
+    # 2x2 cores, one 32x32 tile per core, for a 64x64 tensor.
+    grid = ttnn.CoreRangeSet(
+        {
+            ttnn.CoreRange(
+                ttnn.CoreCoord(grid_start[0], grid_start[1]),
+                ttnn.CoreCoord(grid_start[0] + 1, grid_start[1] + 1),
+            )
+        }
+    )
+    return ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        ttnn.BufferType.L1,
+        ttnn.ShardSpec(grid, (32, 32), orientation),
+    )
+
+
+@pytest.mark.parametrize(
+    "out_grid_start, out_orientation",
+    [
+        ((0, 0), ttnn.ShardOrientation.ROW_MAJOR),  # control: same spec as the input
+        ((0, 0), ttnn.ShardOrientation.COL_MAJOR),  # same cores, other orientation
+        ((2, 0), ttnn.ShardOrientation.ROW_MAJOR),  # other cores
+        ((2, 2), ttnn.ShardOrientation.COL_MAJOR),  # other cores and other orientation
+    ],
+)
+@pytest.mark.parametrize(
+    "input_dtype, output_dtype, torch_in, torch_out",
+    [
+        # Pairs with equal tile sizes, which select the sharded factory.
+        (ttnn.float32, ttnn.int32, torch.float32, torch.int32),
+        (ttnn.bfloat16, ttnn.uint16, torch.bfloat16, torch.int32),
+    ],
+)
+@pytest.mark.parametrize("use_output_tensor", [False, True])
+def test_typecast_sharded_output_spec_differs_from_input(
+    out_grid_start, out_orientation, input_dtype, output_dtype, torch_in, torch_out, use_output_tensor, device
+):
+    """
+    The output shard spec may place shards on other cores or in the other orientation than the input's.
+    Every shard of the output must still hold the converted values of its own region (issue #63628, row 3).
+    """
+    torch.manual_seed(0)
+    shape = (1, 1, 64, 64)
+    # Each of the four tiles gets its own value range, so a swapped or unwritten shard cannot match by chance.
+    torch_input = torch.randint(0, 100, shape).to(torch_in)
+    torch_input[..., :32, 32:] += 1000
+    torch_input[..., 32:, :32] += 2000
+    torch_input[..., 32:, 32:] += 3000
+
+    in_config = _block_sharded_config((0, 0), ttnn.ShardOrientation.ROW_MAJOR)
+    out_config = _block_sharded_config(out_grid_start, out_orientation)
+
+    tt_input = ttnn.from_torch(
+        torch_input, dtype=input_dtype, layout=ttnn.TILE_LAYOUT, device=device, memory_config=in_config
+    )
+    if use_output_tensor:
+        tt_preallocated = ttnn.from_torch(
+            torch.zeros(shape, dtype=torch_out),
+            dtype=output_dtype,
+            layout=ttnn.TILE_LAYOUT,
+            device=device,
+            memory_config=out_config,
+        )
+        tt_output = ttnn.typecast(tt_input, output_dtype, output_tensor=tt_preallocated)
+    else:
+        tt_output = ttnn.typecast(tt_input, output_dtype, memory_config=out_config)
+
+    assert tt_output.dtype == output_dtype
+    assert tt_output.memory_config() == out_config
+    assert torch.equal(ttnn.to_torch(tt_output).to(torch.int64), torch_input.to(torch.int64))

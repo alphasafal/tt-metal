@@ -118,6 +118,26 @@ void BcastDeviceOperation::validate_on_program_cache_miss(
             TT_FATAL(
                 input_tensor_a.memory_config().is_sharded() && out_mem_config.is_sharded(),
                 "Input and output mem layouts must be the same for bcast H op!");
+            // Both sharded-H factories run on input a's shard grid and write each core's result into the output
+            // shard on that same core. Without a preallocated output the spec is derived from input a; a
+            // preallocated one must be laid out the same way or the result lands in the wrong shards.
+            if (tensor_args.preallocated_output.has_value() && input_tensor_a.shard_spec().has_value() &&
+                out_mem_config.shard_spec().has_value()) {
+                const auto& in_shard = input_tensor_a.shard_spec().value();
+                const auto& out_shard = out_mem_config.shard_spec().value();
+                TT_FATAL(
+                    input_tensor_a.memory_config().memory_layout() == out_mem_config.memory_layout() &&
+                        in_shard.grid == out_shard.grid && in_shard.shape == out_shard.shape &&
+                        in_shard.orientation == out_shard.orientation,
+                    "Sharded bcast H requires the preallocated output to have input a's memory layout and shard "
+                    "spec. Input: {}, grid {}, {}. Output: {}, grid {}, {}.",
+                    input_tensor_a.memory_config().memory_layout(),
+                    in_shard.grid,
+                    in_shard.orientation == tt::tt_metal::ShardOrientation::ROW_MAJOR ? "ROW_MAJOR" : "COL_MAJOR",
+                    out_mem_config.memory_layout(),
+                    out_shard.grid,
+                    out_shard.orientation == tt::tt_metal::ShardOrientation::ROW_MAJOR ? "ROW_MAJOR" : "COL_MAJOR");
+            }
         }
     } else {
         TT_FATAL(

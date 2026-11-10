@@ -34,7 +34,24 @@ bool can_use_sharded_optimized_factory(const TypecastParams& args, const Typecas
     // Sharded optimized factory also requires the effective output buffer to be in L1.
     // If the caller configures a DRAM output, fall back to a non-optimized factory.
 
-    if (args.output_memory_config.buffer_type() == BufferType::DRAM) {
+    const MemoryConfig& out_memory_config = tensor_args.preallocated_output.has_value()
+                                                ? tensor_args.preallocated_output->memory_config()
+                                                : args.output_memory_config;
+    if (out_memory_config.buffer_type() == BufferType::DRAM) {
+        return false;
+    }
+
+    // The sharded factory runs on the input's shard grid and converts the input shard on each core straight
+    // into the output shard on that same core, with no data movement between cores. That is only correct when
+    // both specs place the same region of the tensor on each core, so any other output spec takes the generic
+    // factory, which writes each page to where the output's own spec puts it.
+    if (!out_memory_config.shard_spec().has_value()) {
+        return false;
+    }
+    const auto& out_shard_spec = out_memory_config.shard_spec().value();
+    if (!(shard_spec.grid == out_shard_spec.grid) || shard_spec.shape != out_shard_spec.shape ||
+        shard_spec.orientation != out_shard_spec.orientation ||
+        input.memory_config().memory_layout() != out_memory_config.memory_layout()) {
         return false;
     }
 
